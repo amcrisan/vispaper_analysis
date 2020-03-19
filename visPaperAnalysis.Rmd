@@ -1,0 +1,129 @@
+---
+title: "VisPaper_Analaysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(readxl)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(scales)
+```
+
+# Data Preparation
+```{r cars}
+#keywords
+viskeywords<-readxl::read_xlsx("../Tables/datascie_vis_alignement.xlsx")
+processOrder<-unique(viskeywords$Process)
+
+#vispubdata 
+vispubdata_to18<-readxl::read_xlsx("data/IEEE VIS papers 1990-2018.xlsx",sheet = 1)
+vispubdata_19<-readxl::read_xlsx("data/IEEE VIS papers 2019.xlsx")
+
+vispubdata<-rbind(vispubdata_to18,vispubdata_19) %>%
+  dplyr::filter(!is.na(Abstract) & !is.na(AuthorKeywords)) %>%
+  mutate(Abstract = tolower(Abstract)) %>%
+  mutate(AuthorKeywords = tolower(AuthorKeywords))
+```
+
+```{r, echo=FALSE}
+
+viskeywords<-viskeywords %>%
+  tidyr::separate_rows(keyTerms,sep=";") %>%
+  dplyr::mutate(keyTerms = trimws(keyTerms))%>%
+  dplyr::filter(keyTerms != "")
+
+vispubkey <- vispubdata %>%
+  dplyr::select(DOI,AuthorKeywords) %>%
+  tidyr::separate_rows(AuthorKeywords,sep=",") %>%
+  dplyr::mutate(AuthorKeywords = tolower(trimws(AuthorKeywords)))
+
+keywordsJoint<-full_join(viskeywords,vispubkey,by = c("keyTerms" = "AuthorKeywords"))
+  
+```
+
+# Examining Key Terms
+
+Looking athte terms from keyvis.org dataset that was precompiled. Emphasizing the top ten words.
+```{r}
+keywordsJoint %>%
+  dplyr::filter(keyTerms %in% viskeywords$keyTerms)%>%
+  group_by(keyTerms) %>%
+  tally() %>%
+  arrange(-n)
+
+uniquePapers<-keywordsJoint %>%
+  dplyr::filter(keyTerms %in% viskeywords$keyTerms) %>%
+  select(DOI)%>%
+  filter(!is.na(DOI))%>%
+  unique() %>%
+  count()
+
+uniquePapers<-uniquePapers$n
+totalPapers<-nrow(vispubdata)
+totalPer = round((uniquePapers/totalPapers) * 100,2)
+```
+
+There are `r uniquePapers` from a total `r totalPapers` (`r totalPer`%) that match these papers. Most of these (185) (`r round((185/totalPapers)*100,2)`%) are visual analytics, most likely due to the VAST conference.
+
+
+Now, look at the higher and lower order processes involed.
+
+```{r}
+process_coverag<-keywordsJoint %>%
+  dplyr::filter(keyTerms %in% viskeywords$keyTerms) %>%
+  right_join(viskeywords) %>%
+  left_join(vispubdata)
+
+process_coverag$higherOrderProcess <- factor(as.character(process_coverag$higherOrderProcess),
+                                           levels = c("Preparation","Analysis","Communication"))
+
+process_coverag$Process<-factor(as.character(process_coverag$Process), 
+                                 levels= processOrder)
+
+ggplot(data=process_coverag,aes(x=Process))+
+  geom_bar()+
+  coord_flip()+
+  theme_bw()
+```
+
+Now... put this on my process chart
+
+```{r}
+rects <- data.frame(x = c(seq(1,24,by=6),seq(1,24,by=6),seq(1,12,by=6)),
+                    y = c(rep(6,4),rep(3,4),rep(0,2)),
+                    text = processOrder)
+
+process_coverag %>%
+  group_by(Process) %>%
+  tally()%>%
+  mutate(n = n/nrow(process_coverag))%>%
+  full_join(rects,by=c("Process" = "text")) %>%
+  ggplot(aes(x, y, fill = n, label = Process)) +
+    geom_tile(width = 4.5, height = 2,color = "black") + # make square tiles
+    geom_text(color = "black") + # add white text in the middle
+    scale_fill_gradient(high = "black",low="lightgrey",na.value = "white", limits = c(0,1),label=percent)+
+    #scale_fill_identity(guide = "none") + # color the tiles with the colors in the data frame
+    coord_fixed() + # make sure tiles are square
+    theme_void() # remove any axis markings
+```
+
+# Papers
+
+## Analysis
+
+### Modeling
+```{r}
+modeling<-process_coverag %>%
+  filter(Process == "Modeling") %>%
+  mutate(citation = as.numeric(`XploreCitationCount-2020-01`))
+```
+
+## Communication 
+### Collaboration
+```{r}
+collab<-process_coverag %>%
+  filter(Process == "Collaboration") %>%
+  mutate(citation = as.numeric(`XploreCitationCount-2020-01`))
+```

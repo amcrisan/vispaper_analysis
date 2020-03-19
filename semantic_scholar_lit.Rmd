@@ -1,0 +1,351 @@
+---
+title: "Semantic Scholar Data Science"
+output:
+  html_document: default
+  pdf_document: default
+classoption: landscape
+
+---
+```{r wrap-hook,echo=FALSE,message=FALSE,warning=FALSE}
+library(knitr)
+hook_output = knit_hooks$get('output')
+knit_hooks$set(output = function(x, options) {
+  # this hook is used only when the linewidth option is not NULL
+  if (!is.null(n <- options$linewidth)) {
+    x = knitr:::split_lines(x)
+    # any lines wider than n should be wrapped
+    if (any(nchar(x) > n)) x = strwrap(x, width = n)
+    x = paste(x, collapse = '\n')
+  }
+  hook_output(x, options)
+})
+```
+
+```{r setup, include=FALSE}
+library(adjutant)
+library(tidytext)
+library(dplyr)
+library(ggplot2)
+library(topicmodels)
+
+set.seed(416)
+```
+
+## Query terms and getting the datas
+
+Run adjutant to get articles and form unsupervised topic clusters.
+
+**Run the Query**
+We have run a query on semantic scholar of using the search term '"data science" or "big data"'. We limited our analysis to 'journal articles'. This was because prior iterations demonstrated that failure to specify an article type introduced many textbooks into our search results that were not easy to obtain. We also limited our scope to articles written in the past 20 years (2000 to 2020, inclusive).
+
+Finally, there appears to be a query limit of 10,000 items that can be retrieved using semantic scholar. 
+
+The query returns a total of 3038 unique articles as of Jan 21. 2020.
+
+```{r, eval=FALSE}
+query<-'"data science" OR "big data"'
+df<-adjutant::processScholarSearch(query=query,
+                                   publicationTypes = list("JournalArticle"),
+                                   yearMin= 2000,
+                                   yearMax = 2020)
+
+```
+
+**Tidy and Cluster Data**
+
+```{r, eval=FALSE}
+tidy_df<-tidyCorpus(corpus = df) #tidy corpus
+tsneObj<-runTSNE(tidy_df,check_duplicates=FALSE)
+
+#add t-SNE co-ordinates to df object
+df<-inner_join(df,tsneObj$Y,by="PMID")
+optClusters <- optimalParam(df)
+
+df<-inner_join(df,optClusters$retItems,by="PMID") %>%
+    mutate(tsneClusterStatus = ifelse(tsneCluster == 0, "not-clustered","clustered"))
+
+
+clustNames<-df %>%
+          group_by(tsneCluster)%>%
+          mutate(tsneClusterNames = getTopTerms(clustPMID = PMID,
+                                                clustValue=tsneCluster,topNVal = 2,tidyCorpus=tidy_df)) %>%
+          select(PMID,tsneClusterNames) %>%
+          ungroup()
+        
+#update document corpus with cluster names
+df<-inner_join(df,clustNames,by=c("PMID","tsneCluster"))
+
+save.image(file=paste0("./data/", paste(Sys.Date(),"semantic_scholar.Rdata", sep="-")))
+```
+
+**Visualizing the Clusters**
+
+```{r, fig.height=5,fig.width = 8,units="in"}
+
+#load(file="data/2019-12-12-semantic_scholar.Rdata")
+clusterNames <- df %>%
+  dplyr::group_by(tsneClusterNames) %>%
+  dplyr::summarise(medX = median(tsneComp1),
+                   medY = median(tsneComp2)) %>%
+  dplyr::filter(tsneClusterNames != "Not-Clustered")
+
+ggplot(df,aes(x=tsneComp1,y=tsneComp2,group=tsneClusterNames))+
+  geom_point(aes(colour = tsneClusterStatus),alpha=0.2)+
+  stat_ellipse(aes(alpha=tsneClusterStatus))+
+  geom_label(data=clusterNames,aes(x=medX,y=medY,label=tsneClusterNames),size=3,colour="red")+
+  scale_colour_manual(values=c("black","blue"),name="cluster status")+
+  scale_alpha_manual(values=c(1,0),name="cluster status")+ #remove the cluster for noise
+  theme_bw()
+```
+Data cluster around a variety of topics. Dominant are different medical and biomedical studies, which is not terribly surprising. Althouhg the article here come from a variety of data bases, medicine is an evidence based field and collective with epidemiology and biostatistics publishes a lot of studies. There are also articles from the social sciences, looks like some stuff on engineering too. 
+
+## Exploring the clusters
+
+
+Of the 3038, articles that were retrived, 2009 (66%) were clustered whereas 1029 (34%) did not cluster. For completness and to retain the most articles, I will use the clustered samples as a "ground truth" and attempt to train a latent dirichelt allocation model to assign the unclustered articles to some cluster.
+
+```{r}
+table(df$tsneClusterNames != 'Not-Clustered')
+```
+
+
+**Preparing the Data for Classification**
+```{r}
+
+clustered<-filter(df,tsneClusterNames != 'Not-Clustered') %>% ungroup()
+not_clustered<-filter(df,tsneClusterNames == 'Not-Clustered') %>% ungroup()
+
+#need to run LDA with term frequency, and not tf-idf
+
+#preparing the clustered data
+clustered_tidy<-filter(tidy_df, PMID %in% clustered$PMID)
+dtm<-tidytext::cast_dtm(clustered_tidy,PMID,wordStemmed,n)
+
+#preparing unclustered data
+not_clustered_tidy<-filter(tidy_df, PMID %in% not_clustered$PMID)
+not_clustered_dtm<-tidytext::cast_dtm(not_clustered_tidy,PMID,wordStemmed,n)
+
+#number of clusters
+k<-length(unique(clustered$tsneClusterNames))
+
+```
+
+
+
+Latent Dirichelt Allocation (LDA) is the standard method for topic clustering. Here, I am using the initital Adjutant clustered as "ground truth", and training and LDA model using the clustered articles, with a K equal to the number of clusters that Adjutant discovered. 
+
+LDA is another *unsupervised method* (!) so, what's interesting here is that it may not agree with the Adjutant results. I'll also be taking a look at this level of agreement between the two methods.
+
+Using VEM instead of the Gibbs sampling method. I found VEM works better compared to Gibbs.
+
+```{r}
+library(topicmodels)
+
+#train on the clustered results
+lda_model<-LDA(x=dtm,k=k,method = "VEM")
+
+#show the agreement
+train_topics <-posterior(lda_model,dtm)
+train_topics_classM<-apply(train_topics$topics, 1, which.max)
+```
+
+
+Let’s take a quick look at the performance on the topic models.
+
+Interestingly, the tsne cluster and the lda clusters do not exactly agree. However, based upon the visualization below, there is general agreement.
+
+Interestingly, there are some clusters that seem like they could be collapsed, since they are
+separate tsnecluster but fall into the nearly the same lda cluster. This is a decent way to refining those clusters.
+
+```{r}
+idx_match<-match(clustered$PMID,names(train_topics_classM))
+clustered$lda_cluster<-train_topics_classM[idx_match]
+
+#visualizing agreement
+
+cluster_size<-clustered%>%
+  group_by(tsneCluster)%>%
+  tally(name="cluster_size")
+```
+
+Summarizing the indiviudal cluster and overall agreement. I am just accuracy calculations here, however, this really about agreement.
+
+
+```{r}
+#individual cluster accuracy
+
+cluster_map<-clustered %>%
+  group_by(tsneCluster,lda_cluster) %>%
+  tally()%>%
+  left_join(cluster_size)%>%
+  mutate(percent = n/cluster_size) %>%
+  select(tsneCluster,lda_cluster,percent)%>%
+  top_n(1) %>%
+  ungroup()%>%
+  mutate(tsneCluster = forcats::fct_reorder(factor(tsneCluster),percent))
+
+p1<-ggplot(data = cluster_map,aes(y=tsneCluster,x = "",fill = percent))+
+  geom_tile(color="lightgrey")+
+  scale_fill_gradient2(limits =c(0,1),
+                       midpoint = 0.5,
+                       label = scales::percent,
+                       low="red",
+                       mid="white",
+                       high="blue",
+                       name="Percent Aggreement")+
+  labs(title = "Highest % of agreement between clustering methods")+
+  theme_bw()+
+  theme(axis.text =element_blank(),axis.title =element_blank(),legend.position = "right")
+
+p2<-clustered%>%
+  group_by(tsneCluster,lda_cluster)%>%
+  tally%>%
+  left_join(cluster_size)%>%
+  mutate(percent = n/cluster_size)%>%
+  ungroup()%>%
+  tidyr::complete(tsneCluster, lda_cluster, fill =list(n = 0, percent = 0))%>%
+  mutate(tsneCluster =factor(tsneCluster,levels=levels(cluster_map$tsneCluster)))%>%
+  ggplot(aes(y=tsneCluster,x=lda_cluster,fill = percent))+
+  scale_fill_gradient2(limits = c(0,1),
+                      midpoint = 0.5,
+                      label = scales::percent,
+                      low="red",
+                      mid="white",
+                      high="blue",
+                      name="Percent Aggreement")+
+  labs(title = "Highest % of agreement between clustering methods")+
+  theme_bw()+
+  theme(axis.text = element_blank(),
+        axis.title = element_blank(),
+        legend.position = "right")
+  
+
+p3<-cluster_size %>%
+  mutate(cluster_cat = cut(cluster_size,breaks = c(0,20,50,100,140))) %>%
+  ggplot(aes(x="Clust Size",y=tsneCluster))+
+  geom_point(aes(size=cluster_cat),shape=21)+
+  labs(title = "Cluster Size")+
+  theme_bw()+
+  theme(legend.position="none",
+        axis.text.y = element_blank(),
+        axis.title.y = element_blank())
+
+```
+
+On average, there is 55% agreement, however, there is quiet a variety of agreement too, which is interesting to investigate.
+
+```{r}
+summary(cluster_map$percent)
+```
+
+```{r}
+ggplot(data = cluster_map,aes(x=1,y=percent))+
+  geom_boxplot()+
+  geom_jitter(alpha=0.5,width=0.015)+
+  theme_bw()+
+  theme(axis.title.x=element_blank(),
+        panel.grid =element_blank(),
+        axis.text.x =element_blank(),
+        axis.ticks.x =element_blank())
+```
+
+We can take a look at the classification agreement at the level of individual clusters. What we can see here is that agreement variest on a cluster level.
+Some are more certain than others, this can be fundamentally because the different algorithms are picking up on different signal, whereas others are less certain. Its not necessarily because one is more correct that the other. It’s possible tsne is better at finding some clusters in the central messy noise (this is viewable!).
+
+If we add a human in the loop, those uncertain clusters are good ideas of things that could be sent to a human to resolve.The gradient below shows how many articles are assigned to each cluster.
+
+```{r}
+cowplot::plot_grid(p2,p3,p1,align="h",rel_widths =c(6,1,2),nrow=1)
+```
+
+Okay, I will not classify the outstanding articles into a cluster using lda. I will use a simple threshold here for classification : if the posterior is greater
+than or equal to 0.51, then it gets assinged that cluster, otherwise, the article remains unassigned.
+
+Overall, we can see there’s quite a bit of uncertainty. Only 47 articles would be classified to some class (out of 998 that were not classified). This could be because articles belong to multiple classes or because there just isn’t great signal. Lowering the threshold to 0.33 total of 259 articles (or 26% of all unclustered articles), would find a cluster they belong too.
+Subjectively, I will decide here, that its good enough.
+
+
+```{r,fig.width=2.5,units = "in"}
+ggplot(data = cluster_map,aes(x=1,y=percent))+
+  geom_boxplot()+
+  geom_jitter(alpha=0.5,width=0.015)+
+  theme_bw()+
+  theme(axis.title.x= element_blank(),
+        panel.grid = element_blank(),
+        axis.text.x = element_blank(),
+        axis.ticks.x = element_blank())
+```
+
+We can take a look at the classification agreement at the level of individual clusters. What we can see here is that agreement variest on a cluster level. Some are more certain than others, this can be fundamentally because the different algorithms are picking up on different signal, whereas others are less certain. Its not necessarily because one is more correct that the other. It's possible tsne is better at finding some clusters in the central messy noise (this is viewable!).
+
+If we add a human in the loop, those uncertain clusters are good ideas of things that could be sent to a human to resolve. 
+
+The gradient below shows how many articles are assigned to each cluster.
+```{r,fig.height=6,fig.width = 11,unit="in"}
+cowplot::plot_grid(p2,p3,p1,align="h",rel_widths = c(6,1,2),nrow=1)
+```
+
+Okay, I will not classify the outstanding articles into a cluster using lda. I will use a simple threshold here for classification : if the posterior is greater than or equal to 0.51, then it gets assinged that cluster, otherwise, the article remains unassigned.
+
+Overall, we can see there's quite a bit of uncertainty. Only 47 articles would be classified to some class (out of 998 that were not classified). This could be because articles belong to multiple classes or because there just isn't great signal. Lowering the threshold to 0.33 total of 259 articles (or 26% of all unclustered articles), would find a cluster they belong too. 
+
+Subjectively, I will decide here, that its good enough. 
+
+```{r}
+#assign unclustered results to their most probable clusters
+test_topics <- posterior(lda_model,not_clustered_dtm)
+test_topics_prob <- apply(test_topics$topics, 1, max) %>% data.frame()
+colnames(test_topics_prob)<-c("percentage")
+
+
+p1<-ggplot(test_topics_prob,aes(y=1, x=percentage))+
+  geom_jitter(height = 0.01,alpha=0.2)+
+  scale_x_continuous(limits = c(0,1))+
+  geom_vline(xintercept = 0.5,color="red")+
+  geom_vline(xintercept = 0.33,alpha=0.5,color="red")+
+  theme_bw()+
+  theme(axis.text= element_blank(),
+        axis.ticks = element_blank(),
+        axis.title = element_blank())
+
+p2<-ggplot(test_topics_prob,aes(x=percentage))+
+  geom_histogram(binwidth=0.05)+
+  geom_vline(xintercept = 0.5,color="red")+
+  geom_vline(xintercept = 0.33,alpha=0.5,color="red")+
+  theme_bw()
+
+cowplot::plot_grid(nrow=2,ncol=1,p1,p2,align="v",rel_heights =c(3,7))
+```
+
+### Now reassigning those clusters
+```{r}
+test_topics_classM <- apply(test_topics$topics, 1, which.max)
+not_clustered$lda_cluster<-test_topics_classM
+
+reassigned_class<-plyr::mapvalues(test_topics_classM,from = cluster_map$lda_cluster, to=cluster_map$lda_cluster)
+
+#finalize cluster classification
+clustered$final_class<-clustered$tsneCluster
+
+#keep the original clusters
+not_clustered$final_class<-reassigned_class
+
+#viaable articles
+df_final<-rbind(clustered,not_clustered)
+```
+
+
+## Sampling articles
+
+Since I can't look at over 2000 articles, I am going to look at what are likely to me some of the more important articles in this dataset. I what to take a look at the most cited articles each year. I am making an assuption there that these articles are relevant. I want to sample across the different clusters.
+
+```{r}
+
+
+```
+
+
+#Some random notes
+Budget, Authority, Need, Time
+Auhtority, Need, Timeline, Risk, Medpick, 
+
