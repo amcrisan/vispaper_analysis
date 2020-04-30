@@ -27,6 +27,7 @@ library(tidytext)
 library(dplyr)
 library(ggplot2)
 library(topicmodels)
+library(stringr)
 
 set.seed(416)
 ```
@@ -335,17 +336,18 @@ df_final<-rbind(clustered,not_clustered)
 ```
 
 
-## Sampling articles
+## Reviewing articles
 
-Since I can't look at over 2000 articles, I am going to look at what are likely to me some of the more important articles in this dataset. I what to take a look at the most cited articles each year. I am making an assuption there that these articles are relevant. I want to sample across the different clusters.
+First, make sure that all the article specifically mention the word data science in either their titles or abstracts.
 
 ```{r}
 
+df$is_relevant<-str_detect(df$Title,'[dD]ata ([sS]cienc|[aA]naly[a-z]+)') | 
+      str_detect(df$Abstract,'[dD]ata ([sS]cienc|[aA]naly[a-z]+)') |
+    str_detect(df$Title,'[bB]ig [dD]ata') |
+      str_detect(df$Abstract,'[bB]ig [dD]ata')
 
+write.csv(df,"data/datascience_papers.csv",row.names=FALSE,quote = TRUE)
 ```
 
-
-#Some random notes
-Budget, Authority, Need, Time
-Auhtority, Need, Timeline, Risk, Medpick, 
 

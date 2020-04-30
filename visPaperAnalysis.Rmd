@@ -9,6 +9,7 @@ library(dplyr)
 library(ggplot2)
 library(tidyr)
 library(scales)
+library(forcats)
 ```
 
 # Data Preparation
@@ -77,23 +78,28 @@ process_coverag<-keywordsJoint %>%
   left_join(vispubdata)
 
 process_coverag$higherOrderProcess <- factor(as.character(process_coverag$higherOrderProcess),
-                                           levels = c("Preparation","Analysis","Communication"))
+                                           levels = c("Preparation","Analysis","Deployment","Communication"))
 
 process_coverag$Process<-factor(as.character(process_coverag$Process), 
-                                 levels= processOrder)
+                                 levels= rev(processOrder))
 
-ggplot(data=process_coverag,aes(x=Process))+
+g<-ggplot(data=process_coverag,aes(x=Process))+
   geom_bar()+
   coord_flip()+
   theme_bw()
+
+ggsave("PaperOverlap.pdf",g)
 ```
 
 Now... put this on my process chart
 
 ```{r}
-rects <- data.frame(x = c(seq(1,24,by=6),seq(1,24,by=6),seq(1,12,by=6)),
-                    y = c(rep(6,4),rep(3,4),rep(0,2)),
+rects <- data.frame(x = c(seq(1,30,by=6),seq(1,30,by=6),seq(1,12,by=6),seq(1,12,by=6)),
+                    y = c(rep(9,5),rep(6,5),rep(3,2),rep(0,2)),
                     text = processOrder)
+
+process_coverag$Process<-factor(as.character(process_coverag$Process), 
+                                 levels= processOrder)
 
 process_coverag %>%
   group_by(Process) %>%
